@@ -4,6 +4,17 @@ All notable changes are listed here. Versions follow [Semantic Versioning](https
 
 ## Unreleased
 
+### Added
+- **Azahar's compressed formats (Z3DS):** `.zcci`, `.zcia`, `.zcxi` and `.z3dsx`.
+  - **Reading:** every operation takes a compressed file as input. `CtrFile.OpenRead` decompresses as it reads, frame by frame, so decrypting a `.zcci` or converting a `.zcia` to a CCI needs no extra step and no temporary file.
+  - **Writing:** `CtrConvertOptions.Compress` writes any result as Z3DS, with `CompressionLevel` (default 3, as Azahar) and `CompressionFrameSize` (default Azahar's: 256 KiB, or 32 MiB for a CIA). `CompressAsync`/`DecompressAsync` compress a file as it is, or decompress one byte for byte. `OutputHashes` are always those of the plain result, so they can be checked against a DAT.
+  - **Inspecting:** `CtrFile.IsCompressed`, `CtrFileInfo.Compressed`, and `Z3dsFile` and `Z3dsReadStream` for the header, metadata and frames.
+  - **CLI:** new `compress` and `decompress` commands, `--compress` and `--level` for `decrypt` and `convert`, and every command reads Z3DS input.
+- **Dependency:** [ZstdSharp.Port](https://github.com/oleg-st/ZstdSharp) (MIT, pure managed zstd). The library is still pure managed code.
+
+### Changed (breaking)
+- **`CtrFile.OpenRead` returns a `Stream`,** a `Z3dsReadStream` for a compressed file, rather than a `FileStream`.
+
 ### Changed (breaking)
 - **Renamed to `lib-3ds-kit`:** the repository is now [Nickel42/lib-3ds-kit](https://github.com/Nickel42/lib-3ds-kit), the packages are `lib-3ds-kit` and `lib-3ds-kit.Cli`, and release downloads are named `lib-3ds-kit-cli-<version>-<platform>`. The namespace is now `Lib3dsKit` (was `ThreeDsCiaLibrary`; sub-namespaces such as `Lib3dsKit.IO`, `.Crypto` and `.Hashing` follow), and the command-line tool is now `3ds-kit` (was `3ds`; the binaries are `3ds-kit.dll`/`3ds-kit.exe`).
 - **Temporary output files** are named `<output>.lib-3ds-kit.tmp` (was `<output>.3ds-cia-library.tmp`).

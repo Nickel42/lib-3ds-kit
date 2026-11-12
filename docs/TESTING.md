@@ -60,3 +60,7 @@ Not yet checked: cartridge dumps (items 2–5 and 10), installing or booting in 
 
 - **Decrypted header flags.** See SPEC.md → Known limitations. If decrypted cartridge dumps from other tools differ, the likely cause is header bytes: NCSD 0x1100 copy flags, or which flags[7] bits get cleared. That is a one-line change in `NcchHeader.ApplyDecryptedFlags` / `CtrConverter.BuildDecryptedCciView`.
 - **Console installs of CIAs made from carts.** These need a real certificate chain (`--certs-from some.cia`) and signature patches (Luma3DS).
+
+## Azahar's Z3DS files
+
+`tests/fixtures/azahar/` holds two files Azahar 2123 made itself (`azahar -c`) from the decrypted reference fixtures: `game_a.decrypted.zcci` and `game_b.decrypted.zcia`. `Z3dsTests.ReadsFilesAzaharMade` decompresses them and checks the result against `expected.json`. The other direction was checked by hand: `azahar -x` on files from `3ds-kit compress` gives the original bytes. To refresh them, run `azahar -c <file> -o <folder>` on `expected/game_a.decrypted.3ds` (renamed `.cci`) and `expected/game_b.decrypted.cia`.

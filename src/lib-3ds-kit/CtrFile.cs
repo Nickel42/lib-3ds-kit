@@ -2,6 +2,7 @@ using Lib3dsKit.IO;
 using Lib3dsKit.Cia;
 using Lib3dsKit.Ncch;
 using Lib3dsKit.Ncsd;
+using Lib3dsKit.Z3ds;
 
 namespace Lib3dsKit;
 
@@ -22,10 +23,13 @@ public enum CtrFileType
 
 public static class CtrFile
 {
-    /// <summary>Recognized extensions, for file pickers and directory scans.</summary>
-    public static readonly string[] Extensions = { ".3ds", ".cci", ".cia", ".cxi", ".cfa", ".app", ".3dsx" };
+    /// <summary>Recognized extensions, for file pickers and directory scans; the last four are Azahar's compressed (Z3DS) ones.</summary>
+    public static readonly string[] Extensions = { ".3ds", ".cci", ".cia", ".cxi", ".cfa", ".app", ".3dsx", ".zcci", ".zcia", ".zcxi", ".z3dsx" };
 
-    /// <summary>Detect the file type from its contents (extension is ignored).</summary>
+    /// <summary>
+    /// Detect the file type from its contents (extension is ignored). For a Z3DS file opened with
+    /// <see cref="OpenRead"/> (or a <see cref="Z3dsReadStream"/>) this is the type of the file it holds.
+    /// </summary>
     public static CtrFileType Detect(Stream s)
     {
         if (s.Length < 0x20) return CtrFileType.Unknown;
@@ -39,13 +43,35 @@ public static class CtrFile
         return CtrFileType.Unknown;
     }
 
+    /// <summary>The type of the file at <paramref name="path"/>; for a .zcci/.zcia/.zcxi/.z3dsx, the type it holds.</summary>
     public static CtrFileType Detect(string path)
     {
         using var fs = OpenRead(path);
         return Detect(fs);
     }
 
-    internal static FileStream OpenRead(string path) =>
+    /// <summary>Whether the file is compressed with Azahar's Z3DS (.zcci, .zcia, .zcxi, .z3dsx).</summary>
+    public static bool IsCompressed(string path) => Z3dsFile.IsZ3ds(path);
+
+    /// <summary>
+    /// Opens a 3DS file for reading. A Z3DS file comes back as the file it holds, decompressed as it's
+    /// read, so every operation takes compressed and plain files alike.
+    /// </summary>
+    public static Stream OpenRead(string path)
+    {
+        var fs = OpenRaw(path);
+        try
+        {
+            return Z3dsFile.IsZ3ds(fs) ? new Z3dsReadStream(fs) : fs;
+        }
+        catch
+        {
+            fs.Dispose();
+            throw;
+        }
+    }
+
+    internal static FileStream OpenRaw(string path) =>
         new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
 
     /// <summary>

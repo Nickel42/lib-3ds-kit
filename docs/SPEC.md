@@ -103,6 +103,26 @@ Trim keeps bytes [0, end of last partition). Untrim appends 0xFF up to the media
   - `Intact`: every internal check passed.
   - `Unknown`: some checks were skipped (e.g. missing keys) or none apply.
 
+## Z3DS (Azahar's compressed formats)
+
+Azahar's `.zcci`, `.zcia`, `.zcxi` and `.z3dsx` are the plain file compressed with zstd in the seekable format, behind a small header. Layout, all little-endian:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x00 | 4 | `Z3DS` |
+| 0x04 | 4 | What it holds: `NCSD` (CCI), `NCCH` (CXI/CFA), `CIA\0` or `3DSX` |
+| 0x08 | 1 | Version, 1 |
+| 0x09 | 1 | Reserved, 0 |
+| 0x0A | 2 | Header size, 0x20 |
+| 0x0C | 4 | Metadata size, a multiple of 0x10 |
+| 0x10 | 8 | Compressed size: the zstd stream after the metadata, its seek table included |
+| 0x18 | 8 | Size of the file it holds |
+
+- **Metadata:** a version byte (1), then items of (type u8, name length u8, data length u16, name, data), ended by an all-zero item and zero-padded to 0x10. Type 1 is binary; other types are skipped when reading.
+- **Data:** independent zstd frames, each holding at most one frame size of the plain file (Azahar: 256 KiB, or 32 MiB for a CIA). They are followed by the zstd seekable format's seek table: a skippable frame (magic `0x184D2A5E`) listing each frame's compressed and decompressed size, then a footer of frame count, descriptor and `0x8F92EAB1`. Frames are written without checksums, as Azahar writes them; checksummed tables are read as well.
+- **Reading:** `Z3dsReadStream` maps a position to its frame through the seek table and keeps the last frame it decompressed. Sequential reads therefore decompress each frame once, and the library's random reads (headers, then partitions) stay cheap.
+- **Writing:** frames are compressed in parallel, at most about 256 MiB of input at a time, and written in order; the header is written last. CCI and NCCH results are compressed as they are written. A CIA's TMD is filled in after its contents, so a CIA result is written plain beside the output (`<output>.plain.lib-3ds-kit.tmp`) and then compressed into place.
+
 ## Missing keys
 
 With `Decrypt = true`, a missing key throws `MissingKeyException`; the C# code never writes partially decrypted output. The Python reference instead passes such contents through still encrypted, but no test covers that path. With `Decrypt = false`, a missing NCCH key only produces a warning, and the content is copied unchanged without the SD-flag or meta update.
@@ -111,7 +131,8 @@ With `Decrypt = true`, a missing key throws `MissingKeyException`; the C# code n
 
 - **Paths, not streams:** the public API takes file paths. Apps that receive streams or content URIs (Android's Storage Access Framework, iOS document pickers) copy the file into their own storage first.
 - **No re-encryption:** decrypted → encrypted conversion is not supported. The original flags are lost on decryption, and nothing downstream needs it.
-- **No Z3DS:** Azahar's compressed formats (.zcci/.zcia/.zcxi) are not supported yet.
+- **Z3DS bundles:** Azahar's bundles (`.bcci`, `.bcia`, `.bcxi`: a game with its updates and DLC in one tar) are not read or written.
+- **Z3DS metadata:** files are written with the `compressor`, `date` and `maxframesize` items. Azahar also writes `titleinfo` and `smdh` for games; they are optional, and Azahar reads the title from the game itself.
 - **DSiWare:** SRL contents in CIAs are CBC-decrypted and hash-checked, but not parsed.
 - **RomFS:** only the superblock (IVFC header and master hash) is verified, not every IVFC level. Full integrity of a CIA is still covered by the TMD content hashes.
 - **Decrypted header flags follow GodMode9:** decrypting sets the NCCH "no crypto" flag the way GodMode9 does. Byte-exact agreement with decrypted cartridge dumps made by other tools has not been confirmed on real dumps.

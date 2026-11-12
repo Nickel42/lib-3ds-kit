@@ -1,6 +1,6 @@
 # lib-3ds-kit
 
-A pure C# library for converting and decrypting Nintendo 3DS files in any .NET app: decrypt CCI (`.3ds`), CIA, CXI and CFA files, convert between CCI and CIA, build CIAs from CDN downloads, and trim or untrim cartridge images. It can also read a file's title and encryption details, and check the hashes stored inside it to confirm a result came out intact. No native code, no dependencies, no keys bundled.
+A pure C# library for converting and decrypting Nintendo 3DS files in any .NET app: decrypt CCI (`.3ds`), CIA, CXI and CFA files, convert between CCI and CIA, build CIAs from CDN downloads, trim or untrim cartridge images, and compress or decompress Azahar's Z3DS formats (`.zcci`, `.zcia`, `.zcxi`, `.z3dsx`). It can also read a file's title and encryption details, and check the hashes stored inside it to confirm a result came out intact. No native code, no keys bundled; the only dependency is [ZstdSharp.Port](https://github.com/oleg-st/ZstdSharp), a pure managed zstd.
 
 [![CI](https://github.com/Nickel42/lib-3ds-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Nickel42/lib-3ds-kit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Nickel42/lib-3ds-kit/blob/main/LICENSE)
@@ -46,6 +46,8 @@ Standalone `3ds-kit` binaries for Windows, Linux and macOS (no .NET install need
 | CIA (.cia) | ✓ (title-key + NCCH layers) | ✓ game titles only | — | — | ✓ (TMD hashes) |
 | CXI / CFA | ✓ | — | — | — | ✓ |
 | CDN folder (`tmd`, `cetk`, content files) | ✓ (→ decrypted CIA) | via the CIA | ✓ | — | contents checked against the TMD |
+
+Every row also takes the file compressed as Azahar's Z3DS (`.zcci`, `.zcia`, `.zcxi`), and every result can be written compressed. See [Azahar's compressed formats](#azahars-compressed-formats-z3ds).
 
 Encryption: original (0x2C), 7.x (0x25), New 3DS 9.3 (0x18) and 9.6 (0x1B), seed crypto (seeddb), fixed zero key and fixed system key, and CIA title keys (common keys 0–5).
 
@@ -101,7 +103,22 @@ CtrVerifyReport report = await new CtrVerifier(keys).VerifyAsync(output);
 // report.Verdict: Intact / Unknown (checks skipped, e.g. missing keys) / Bad
 ```
 
-Other operations: `DecryptAsync`, `TrimAsync`, `UntrimAsync`. All have synchronous versions too.
+Other operations: `DecryptAsync`, `TrimAsync`, `UntrimAsync`, `CompressAsync`, `DecompressAsync`. All have synchronous versions too.
+
+## Azahar's compressed formats (Z3DS)
+
+`.zcci`, `.zcia`, `.zcxi` and `.z3dsx` are Azahar's compressed versions of `.cci`, `.cia`, `.cxi` and `.3dsx`: zstd in the seekable format, so Azahar plays them without unpacking. A decrypted game typically shrinks by a third to a half.
+
+- **Every operation reads them:** decrypt a `.zcci`, convert a `.zcia` to a CCI, inspect or verify one. Only the parts read are decompressed, and no temporary file is made.
+- **Write one from any operation** with `Compress = true`:
+
+  ```csharp
+  // An encrypted .cia → a decrypted, compressed .zcci, in one pass.
+  await converter.ConvertAsync("game.cia", "game.zcci", CtrOutputFormat.Cci, new CtrConvertOptions { Compress = true });
+  ```
+- **Or as they are:** `CompressAsync` (nothing is decrypted) and `DecompressAsync` (byte for byte).
+- **Hashes:** `OutputHashes` are those of the plain file, so they match the No-Intro DAT entry of the decrypted dump even when the file is compressed. `CtrVerifier` likewise hashes what a compressed file holds.
+- **Not supported:** Azahar's bundles (`.bcci`, `.bcia`, `.bcxi`).
 
 ## Using it in an app
 
@@ -142,9 +159,12 @@ The verdict is `Intact` when every check passes, `Bad` when any fails, and `Unkn
 3ds-kit convert "cdn/0004000000123400" --to cia # CDN folder -> decrypted CIA
 3ds-kit trim "Game.3ds"
 3ds-kit verify "Game.cia"                       # or a folder; add --recursive
+3ds-kit convert "Game.cia" --to cci --compress   # -> Game.zcci, decrypted and compressed for Azahar
+3ds-kit compress "Game.3ds"                     # -> Game.zcci, as it is
+3ds-kit decompress "Game.zcci"                  # -> Game.cci
 ```
 
-Run `3ds-kit --help` for every option (`--keys-dir`, `--boot9`, `--aes-keys`, `--seeddb`, `--certs-from`, `--keep-encryption`, `--match-ticket-version`, …).
+Run `3ds-kit --help` for every option (`--keys-dir`, `--boot9`, `--aes-keys`, `--seeddb`, `--certs-from`, `--keep-encryption`, `--compress`, `--level`, `--match-ticket-version`, …).
 
 ## Building from source
 
