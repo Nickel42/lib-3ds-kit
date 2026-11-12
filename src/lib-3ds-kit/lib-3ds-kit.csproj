@@ -3,9 +3,13 @@
     <AssemblyName>lib-3ds-kit</AssemblyName>
     <PackageId>lib-3ds-kit</PackageId>
     <RootNamespace>Lib3dsKit</RootNamespace>
-    <Description>Convert and decrypt Nintendo 3DS files: decrypt CCI (.3ds), CIA, CXI and CFA; convert CCI ↔ CIA; build CIAs from CDN downloads; trim and untrim; inspect titles and check internal hashes. Pure managed, no dependencies; bring your own keys.</Description>
-    <PackageTags>3ds;nintendo-3ds;ctr;cia;cci;ncch;ncsd;cdn;rom;decrypt;convert</PackageTags>
+    <Description>Convert and decrypt Nintendo 3DS files: decrypt CCI (.3ds), CIA, CXI and CFA; convert CCI ↔ CIA; build CIAs from CDN downloads; trim and untrim; inspect titles and check internal hashes. Compress and decompress Azahar Z3DS (.zcci, .zcia, .zcxi, .z3dsx). Pure managed; bring your own keys.</Description>
+    <PackageTags>3ds;nintendo-3ds;ctr;cia;cci;ncch;ncsd;cdn;rom;decrypt;convert;z3ds;zcci;azahar;zstd</PackageTags>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Pure managed zstd (MIT), for Azahar's Z3DS format. -->
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+  </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="lib-3ds-kit.Tests" />
   </ItemGroup>

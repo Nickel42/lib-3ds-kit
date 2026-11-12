@@ -5,6 +5,7 @@ using Lib3dsKit.Cia;
 using Lib3dsKit.Keys;
 using Lib3dsKit.Ncch;
 using Lib3dsKit.Ncsd;
+using Lib3dsKit.Z3ds;
 
 namespace Lib3dsKit.Operations;
 
@@ -45,10 +46,34 @@ public sealed class CtrConvertOptions
     /// ticket. Installers ignore the mismatch; this only makes the CIA consistent.
     /// </summary>
     public bool MatchTicketVersionToTmd { get; init; }
+
+    /// <summary>
+    /// Write the result compressed in Azahar's Z3DS format (.zcci for a CCI, .zcia for a CIA, .zcxi for
+    /// an NCCH). <see cref="CtrOperationResult.OutputHashes"/> are still those of the plain result.
+    /// </summary>
+    public bool Compress { get; init; }
+
+    /// <summary>zstd level for <see cref="Compress"/> and <see cref="CtrConverter.Compress"/> (Azahar uses 3).</summary>
+    public int CompressionLevel { get; init; } = 3;
+
+    /// <summary>Bytes per Z3DS frame; 0 for Azahar's own (256 KiB, or 32 MiB for a CIA).</summary>
+    public int CompressionFrameSize { get; init; }
+
+    internal CtrConvertOptions With(bool compress) => new()
+    {
+        Decrypt = Decrypt, Trim = Trim, Overwrite = Overwrite, ComputeOutputHashes = ComputeOutputHashes,
+        CertificateChain = CertificateChain, VerifyContents = VerifyContents, MatchTicketVersionToTmd = MatchTicketVersionToTmd,
+        Compress = compress, CompressionLevel = CompressionLevel, CompressionFrameSize = CompressionFrameSize,
+    };
 }
 
 /// <summary>Outcome of a conversion.</summary>
-public sealed record CtrOperationResult(string OutputPath, CtrFileType OutputType, FileHashes? OutputHashes, IReadOnlyList<string> Warnings);
+/// <param name="OutputHashes">Hashes of the plain result, also when it was written compressed.</param>
+public sealed record CtrOperationResult(string OutputPath, CtrFileType OutputType, FileHashes? OutputHashes, IReadOnlyList<string> Warnings)
+{
+    /// <summary>Whether the output is compressed (Z3DS).</summary>
+    public bool Compressed { get; init; }
+}
 
 /// <summary>
 /// Decrypts, converts (CCI ↔ CIA), trims and untrims 3DS files. All methods stream: memory use
@@ -78,6 +103,19 @@ public sealed class CtrConverter
     public Task<CtrOperationResult> TrimAsync(string input, string output, CtrConvertOptions? options = null,
         IProgress<OperationProgress>? progress = null, CancellationToken ct = default) =>
         Task.Run(() => Trim(input, output, options ?? new(), progress, ct), ct);
+
+    /// <summary>
+    /// Compress a CCI, CIA, CXI/CFA or 3DSX as it is into Azahar's Z3DS format (.zcci, .zcia, .zcxi, .z3dsx).
+    /// Nothing is decrypted; convert or decrypt with <see cref="CtrConvertOptions.Compress"/> for that.
+    /// </summary>
+    public Task<CtrOperationResult> CompressAsync(string input, string output, CtrConvertOptions? options = null,
+        IProgress<OperationProgress>? progress = null, CancellationToken ct = default) =>
+        Task.Run(() => Compress(input, output, options ?? new(), progress, ct), ct);
+
+    /// <summary>Decompress a Z3DS file (.zcci, .zcia, .zcxi, .z3dsx) back to the file it holds, byte for byte.</summary>
+    public Task<CtrOperationResult> DecompressAsync(string input, string output, CtrConvertOptions? options = null,
+        IProgress<OperationProgress>? progress = null, CancellationToken ct = default) =>
+        Task.Run(() => Decompress(input, output, options ?? new(), progress, ct), ct);
 
     /// <summary>Pad a trimmed CCI with 0xFF back to the card size declared in its header.</summary>
     public Task<CtrOperationResult> UntrimAsync(string input, string output, CtrConvertOptions? options = null,
@@ -157,9 +195,32 @@ public sealed class CtrConverter
         }, new List<string>());
     }
 
+    public CtrOperationResult Compress(string input, string output, CtrConvertOptions options,
+        IProgress<OperationProgress>? progress = null, CancellationToken ct = default)
+    {
+        if (CtrFile.IsCompressed(input)) throw new CtrFormatException("Input is already compressed (Z3DS).");
+        using var src = CtrFile.OpenRaw(input);
+        var type = CtrFile.Detect(src);
+        if (type == CtrFileType.Unknown) throw new CtrFormatException("Unrecognized file; expected .3ds/.cci, .cia, .cxi, .cfa or .3dsx.");
+        src.Position = 0;
+        return WriteSequential(output, type, options.With(compress: true), progress, ct, src.Length, (dst, tracker, hasher) =>
+            StreamCopier.CopyAll(src, dst, tracker, ct, hasher), new List<string>());
+    }
+
+    public CtrOperationResult Decompress(string input, string output, CtrConvertOptions options,
+        IProgress<OperationProgress>? progress = null, CancellationToken ct = default)
+    {
+        if (!CtrFile.IsCompressed(input)) throw new CtrFormatException("Input isn't compressed (Z3DS).");
+        using var src = CtrFile.OpenRead(input);
+        var type = CtrFile.Detect(src);
+        src.Position = 0;
+        return WriteSequential(output, type, options.With(compress: false), progress, ct, src.Length, (dst, tracker, hasher) =>
+            StreamCopier.CopyAll(src, dst, tracker, ct, hasher), new List<string>());
+    }
+
     // ============================================================= decrypt ===
 
-    private CtrOperationResult DecryptNcch(FileStream src, string output, CtrFileType type, CtrConvertOptions options,
+    private CtrOperationResult DecryptNcch(Stream src, string output, CtrFileType type, CtrConvertOptions options,
         IProgress<OperationProgress>? progress, CancellationToken ct)
     {
         var warnings = new List<string>();
@@ -169,7 +230,7 @@ public sealed class CtrConverter
             StreamCopier.CopyAll(ncch, dst, tracker, ct, hasher), warnings);
     }
 
-    private CtrOperationResult DecryptCci(FileStream src, string output, CtrConvertOptions options,
+    private CtrOperationResult DecryptCci(Stream src, string output, CtrConvertOptions options,
         IProgress<OperationProgress>? progress, CancellationToken ct)
     {
         var warnings = new List<string>();
@@ -220,7 +281,7 @@ public sealed class CtrConverter
         byte[]? titleKey = cia.Contents.Any(c => c.Chunk.IsEncrypted) ? cia.Ticket.DecryptTitleKey(_keys) : null;
         var newChunks = cia.Tmd.Chunks.ToList();
         var tracker = new ProgressTracker(progress, CiaProgressTotal(src.Length, options));
-        using var writer = new AtomicFileWriter(output, options.Overwrite);
+        using var writer = CiaWriter(output, options);
         var dst = writer.Stream;
 
         tracker.SetStage("Copying CIA header");
@@ -323,7 +384,7 @@ public sealed class CtrConverter
             Add(tmd, pad: true);
             foreach (var c in cdn.Contents)
             {
-                var fs = CtrFile.OpenRead(c.Path);
+                var fs = CtrFile.OpenRaw(c.Path);
                 files.Add(fs);
                 pieces.Add(new SubStream(fs, 0, (long)c.Chunk.Size));
             }
@@ -399,7 +460,7 @@ public sealed class CtrConverter
 
     // =========================================================== CCI → CCI ===
 
-    private CtrOperationResult CciToCci(FileStream src, string output, CtrConvertOptions options,
+    private CtrOperationResult CciToCci(Stream src, string output, CtrConvertOptions options,
         IProgress<OperationProgress>? progress, CancellationToken ct)
     {
         var warnings = new List<string>();
@@ -417,7 +478,7 @@ public sealed class CtrConverter
 
     // =========================================================== CCI → CIA ===
 
-    private CtrOperationResult CciToCia(FileStream src, string output, CtrConvertOptions options,
+    private CtrOperationResult CciToCia(Stream src, string output, CtrConvertOptions options,
         IProgress<OperationProgress>? progress, CancellationToken ct)
     {
         var warnings = new List<string>();
@@ -458,7 +519,7 @@ public sealed class CtrConverter
             contents.Select(c => c.Index));
 
         var tracker = new ProgressTracker(progress, CiaProgressTotal((long)contentSize, options));
-        using var writer = new AtomicFileWriter(output, options.Overwrite);
+        using var writer = CiaWriter(output, options);
         var dst = writer.Stream;
         dst.Write(header);
         StreamCopier.PadTo(dst, CiaFile.Alignment);
@@ -491,7 +552,7 @@ public sealed class CtrConverter
 
     // =========================================================== CIA → CCI ===
 
-    private CtrOperationResult CiaToCci(FileStream src, string output, CtrConvertOptions options,
+    private CtrOperationResult CiaToCci(Stream src, string output, CtrConvertOptions options,
         IProgress<OperationProgress>? progress, CancellationToken ct)
     {
         var warnings = new List<string>();
@@ -612,11 +673,29 @@ public sealed class CtrConverter
         var tracker = new ProgressTracker(progress, totalBytes);
         using var hasher = options.ComputeOutputHashes ? new MultiHasher() : null;
         using var writer = new AtomicFileWriter(output, options.Overwrite);
-        tracker.SetStage("Writing " + Path.GetFileName(output));
-        write(writer.Stream, tracker, hasher);
+        tracker.SetStage((options.Compress ? "Compressing " : "Writing ") + Path.GetFileName(output));
+        if (options.Compress)
+        {
+            using var z = new Z3dsWriteStream(writer.Stream, type, options.CompressionFrameSize, options.CompressionLevel);
+            write(z, tracker, hasher);
+            ct.ThrowIfCancellationRequested();
+            z.Finish();
+        }
+        else write(writer.Stream, tracker, hasher);
         ct.ThrowIfCancellationRequested();
         writer.Commit();
-        return new CtrOperationResult(Path.GetFullPath(output), type, hasher?.Finish(), warnings);
+        return new CtrOperationResult(Path.GetFullPath(output), type, hasher?.Finish(), warnings) { Compressed = options.Compress };
+    }
+
+    /// <summary>
+    /// Where a CIA is written: the output itself, or, when it's to be compressed, a plain file beside it
+    /// that <see cref="Finish"/> compresses (a CIA's TMD is filled in last, so it can't be compressed as it's written).
+    /// </summary>
+    private static AtomicFileWriter CiaWriter(string output, CtrConvertOptions options)
+    {
+        if (!options.Compress) return new AtomicFileWriter(output, options.Overwrite);
+        if (!options.Overwrite && File.Exists(output)) throw new IOException($"Output file already exists: {Path.GetFullPath(output)}");
+        return new AtomicFileWriter(output + ".plain", overwrite: true);
     }
 
     /// <summary>Progress total for a CIA write: the bytes written, plus a read-back pass when output hashes are wanted.</summary>
@@ -640,6 +719,23 @@ public sealed class CtrConverter
             hashes = MultiHasher.HashStream(writer.Stream, HashKinds.All, ct, tracker);
         }
         ct.ThrowIfCancellationRequested();
+        if (options.Compress)
+        {
+            // The plain CIA (see CiaWriter) goes into the real output compressed; its temp file is then deleted.
+            var plain = writer.Stream;
+            tracker.TotalBytes = tracker.Processed + plain.Length;
+            tracker.SetStage("Compressing " + Path.GetFileName(output));
+            using var final = new AtomicFileWriter(output, options.Overwrite);
+            using (var z = new Z3dsWriteStream(final.Stream, type, options.CompressionFrameSize, options.CompressionLevel))
+            {
+                plain.Position = 0;
+                StreamCopier.CopyAll(plain, z, tracker, ct);
+                ct.ThrowIfCancellationRequested();
+                z.Finish();
+            }
+            final.Commit();
+            return new CtrOperationResult(Path.GetFullPath(output), type, hashes, warnings) { Compressed = true };
+        }
         writer.Commit();
         return new CtrOperationResult(Path.GetFullPath(output), type, hashes, warnings);
     }

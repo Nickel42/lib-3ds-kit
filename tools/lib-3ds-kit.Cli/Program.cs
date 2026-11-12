@@ -4,6 +4,7 @@ using Lib3dsKit.Keys;
 using Lib3dsKit.Ncch;
 using Lib3dsKit.Operations;
 using Lib3dsKit.Verification;
+using Lib3dsKit.Z3ds;
 
 namespace Lib3dsKit.Cli;
 
@@ -25,6 +26,10 @@ internal static class Program
           trim <in> [out]               Trim a CCI to the end of its last partition
           untrim <in> [out]             Pad a trimmed CCI back to its card size
           verify <file|dir>...          Hash files and check the hashes stored inside them
+          compress <in> [out]           Compress as Azahar's Z3DS (.zcci/.zcia/.zcxi/.z3dsx), as is
+          decompress <in> [out]         Decompress a Z3DS file back to the file it holds
+
+        Every command reads Z3DS files (.zcci, .zcia, .zcxi, .z3dsx) as well as plain ones.
 
         Key options (keys are never bundled; point at your own dumps):
           --keys-dir <dir>              Extra folder to search for boot9.bin/aes_keys.txt/seeddb.bin
@@ -34,6 +39,8 @@ internal static class Program
 
         Other options:
           --keep-encryption             convert: keep NCCH encryption
+          --compress                    decrypt/convert: write the result as Z3DS (.zcci, .zcia…)
+          --level <n>                   zstd level for Z3DS output (default 3, as Azahar)
           --no-trim                     convert to CCI: pad to full card size
           --match-ticket-version        CDN: write the TMD's title version into the ticket
           --no-verify-contents          CDN: skip checking contents against the TMD
@@ -72,6 +79,8 @@ internal static class Program
                 "trim" => await TrimOrUntrim(keys, args, rest, trim: true, cts.Token),
                 "untrim" => await TrimOrUntrim(keys, args, rest, trim: false, cts.Token),
                 "verify" => await Verify(keys, args, rest, cts.Token),
+                "compress" => await CompressOrDecompress(keys, args, rest, compress: true, cts.Token),
+                "decompress" => await CompressOrDecompress(keys, args, rest, compress: false, cts.Token),
                 _ => throw new UsageException($"Unknown command '{cmd}'."),
             };
         }
@@ -143,7 +152,7 @@ internal static class Program
         var i = CtrInspector.Inspect(path, keys);
         Console.WriteLine($"File:          {i.Path}");
         Console.WriteLine($"Type:          {i.Type}");
-        Console.WriteLine($"Size:          {i.FileSize:N0} bytes");
+        Console.WriteLine($"Size:          {i.FileSize:N0} bytes{(i.Compressed ? " (Z3DS-compressed; size of the file it holds)" : "")}");
         if (i.Type == CtrFileType.Unknown) return 1;
         Console.WriteLine($"Title ID:      {i.TitleIdHex}");
         Console.WriteLine($"Product code:  {i.ProductCode} ({i.Region ?? "unknown region"})");
@@ -176,14 +185,20 @@ internal static class Program
     {
         Require(rest, 1, "decrypt <in> [out]");
         string input = rest[0];
-        string output = rest.Count > 1 ? rest[1] : Sibling(input, ".decrypted" + Path.GetExtension(input));
-        if (rest.Count == 1 && Directory.Exists(input))
-            output = Sibling(input, ".decrypted.cia");
+        bool compress = args.Has("--compress");
+        // A plain file keeps its extension, a Z3DS one gets its plain one back, unless --compress asks for Z3DS.
+        var type = Directory.Exists(input) ? CtrFileType.Cia : CtrFile.Detect(input);
+        string ext = compress ? Z3dsFile.CompressedExtension(type)
+            : Directory.Exists(input) ? ".cia"
+            : CtrFile.IsCompressed(input) ? Z3dsFile.PlainExtension(type) : Path.GetExtension(input);
+        string output = rest.Count > 1 ? rest[1] : Sibling(input, ".decrypted" + ext);
         var r = await new CtrConverter(keys).DecryptAsync(input, output, new CtrConvertOptions
         {
             Overwrite = args.Has("--overwrite"),
             VerifyContents = !args.Has("--no-verify-contents"),
             MatchTicketVersionToTmd = args.Has("--match-ticket-version"),
+            Compress = compress,
+            CompressionLevel = Level(args),
         }, new ConsoleProgress(), ct);
         return Report(r);
     }
@@ -199,7 +214,14 @@ internal static class Program
             _ => throw new UsageException("--to must be cci or cia"),
         };
         string input = rest[0];
-        string ext = target == CtrOutputFormat.Cci ? ".3ds" : ".cia";
+        bool compress = args.Has("--compress");
+        string ext = (target, compress) switch
+        {
+            (CtrOutputFormat.Cci, false) => ".3ds",
+            (CtrOutputFormat.Cci, true) => ".zcci",
+            (_, false) => ".cia",
+            _ => ".zcia",
+        };
         string output = rest.Count > 1 ? rest[1] : Sibling(input, ext);
         if (string.Equals(Path.GetFullPath(output), Path.GetFullPath(input),
                 OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase)) output = Sibling(input, ".converted" + ext);
@@ -210,6 +232,8 @@ internal static class Program
             Overwrite = args.Has("--overwrite"),
             VerifyContents = !args.Has("--no-verify-contents"),
             MatchTicketVersionToTmd = args.Has("--match-ticket-version"),
+            Compress = compress,
+            CompressionLevel = Level(args),
         };
         var r = await new CtrConverter(keys).ConvertAsync(input, output, target, options, new ConsoleProgress(), ct);
         return Report(r);
@@ -267,6 +291,29 @@ internal static class Program
         }
     }
 
+    private static async Task<int> CompressOrDecompress(CtrKeyStore keys, Args args, List<string> rest, bool compress, CancellationToken ct)
+    {
+        Require(rest, 1, (compress ? "compress" : "decompress") + " <in> [out]");
+        string input = rest[0];
+        var type = CtrFile.Detect(input);
+        string output = rest.Count > 1 ? rest[1]
+            : Sibling(input, compress ? Z3dsFile.CompressedExtension(type) : Z3dsFile.PlainExtension(type));
+        var conv = new CtrConverter(keys);
+        var options = new CtrConvertOptions { Overwrite = args.Has("--overwrite"), CompressionLevel = Level(args) };
+        var r = compress
+            ? await conv.CompressAsync(input, output, options, new ConsoleProgress(), ct)
+            : await conv.DecompressAsync(input, output, options, new ConsoleProgress(), ct);
+        if (compress)
+        {
+            long before = new FileInfo(input).Length, after = new FileInfo(r.OutputPath).Length;
+            Console.WriteLine($"{before:N0} → {after:N0} bytes ({(before == 0 ? 0 : 100.0 * after / before):0.0}%)");
+        }
+        return Report(r);
+    }
+
+    private static int Level(Args args) =>
+        args.Value("--level") is { } l ? int.TryParse(l, out var n) && n is >= 1 and <= 22 ? n : throw new UsageException("--level must be 1 to 22") : 3;
+
     private static string Sibling(string input, string suffixWithExt)
     {
         string dir = Path.GetDirectoryName(Path.GetFullPath(input)) ?? ".";
@@ -282,7 +329,7 @@ internal static class Program
     private static int Report(CtrOperationResult r)
     {
         ConsoleProgress.Clear();
-        Console.WriteLine($"Wrote {r.OutputPath} ({r.OutputType})");
+        Console.WriteLine($"Wrote {r.OutputPath} ({r.OutputType}{(r.Compressed ? ", Z3DS" : "")})");
         if (r.OutputHashes is { } h) Console.WriteLine($"    {h}");
         foreach (var w in r.Warnings) Console.WriteLine("warning: " + w);
         return 0;
@@ -322,7 +369,7 @@ internal sealed class Args
 {
     private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal)
     {
-        "--keys-dir", "--boot9", "--aes-keys", "--seeddb", "--certs-from", "--to",
+        "--keys-dir", "--boot9", "--aes-keys", "--seeddb", "--certs-from", "--to", "--level",
     };
 
     private readonly List<(string Name, string? Value)> _options = new();

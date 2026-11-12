@@ -32,6 +32,8 @@ public sealed record CtrFileInfo
     public SmdhInfo? Titles { get; init; }
     public ulong SaveDataSize { get; init; }
     public bool Encrypted { get; init; }
+    /// <summary>The file is Azahar's Z3DS (.zcci, .zcia, .zcxi, .z3dsx); <see cref="FileSize"/> is that of the file it holds.</summary>
+    public bool Compressed { get; init; }
     /// <summary>CCI only: card size from the header and end of the last partition.</summary>
     public long MediaSize { get; init; }
     public long UsedSize { get; init; }
@@ -50,7 +52,7 @@ public static class CtrInspector
     public static CtrFileInfo Inspect(string path, CtrKeyStore? keys = null)
     {
         using var fs = CtrFile.OpenRead(path);
-        return Inspect(fs, path, keys ?? new CtrKeyStore());
+        return Inspect(fs, path, keys ?? new CtrKeyStore()) with { Compressed = fs is Z3ds.Z3dsReadStream };
     }
 
     public static CtrFileInfo Inspect(Stream s, string path, CtrKeyStore keys)
