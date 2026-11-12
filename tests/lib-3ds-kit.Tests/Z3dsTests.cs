@@ -196,6 +196,27 @@ public class Z3dsTests
         Assert.Throws<CtrFormatException>(() => CtrFile.Detect(z));
     }
 
+    /// <summary>
+    /// Files Azahar itself made (2123, <c>azahar -c</c>) from the decrypted reference fixtures: this library reads them
+    /// back byte for byte. The other direction (<c>azahar -x</c> on this library's files) was checked by hand.
+    /// </summary>
+    [Theory]
+    [InlineData("azahar/game_a.decrypted.zcci", "game_a.decrypted.3ds", "NCSD", CtrFileType.Cci)]
+    [InlineData("azahar/game_b.decrypted.zcia", "game_b.decrypted.cia", "CIA", CtrFileType.Cia)]
+    public async Task ReadsFilesAzaharMade(string fixture, string expected, string magic, CtrFileType type)
+    {
+        using var tmp = new TempDir();
+        string input = Fixtures.File(fixture), back = tmp.File("back.bin");
+        using (var fs = File.OpenRead(input))
+        {
+            Assert.Equal(magic, Z3dsFile.ReadHeader(fs).UnderlyingMagic);
+            Assert.StartsWith("Azahar", System.Text.Encoding.ASCII.GetString(Z3dsFile.ReadMetadata(fs)["compressor"]));
+        }
+        Assert.Equal(type, CtrFile.Detect(input));
+        await Converter().DecompressAsync(input, back);
+        Assert.Equal(Fixtures.ExpectedSha256(expected), Fixtures.Sha256OfFile(back));
+    }
+
     [Fact]
     public void Metadata_RoundTripsAndSkipsUnknownItems()
     {
