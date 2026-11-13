@@ -10,7 +10,7 @@ All notable changes are listed here. Versions follow [Semantic Versioning](https
   - **Writing:** `CtrConvertOptions.Compress` writes any result as Z3DS, with `CompressionLevel` (default 3, as Azahar) and `CompressionFrameSize` (default Azahar's: 256 KiB, or 32 MiB for a CIA). `CompressAsync`/`DecompressAsync` compress a file as it is, or decompress one byte for byte. `OutputHashes` are always those of the plain result, so they can be checked against a DAT.
   - **Inspecting:** `CtrFile.IsCompressed`, `CtrFileInfo.Compressed`, and `Z3dsFile` and `Z3dsReadStream` for the header, metadata and frames.
   - **CLI:** new `compress` and `decompress` commands, `--compress` and `--level` for `decrypt` and `convert`, and every command reads Z3DS input.
-- **Dependency:** [ZstdSharp.Port](https://github.com/oleg-st/ZstdSharp) (MIT, pure managed zstd). The library is still pure managed code.
+- **Dependency:** [ZstdSharp.Port](https://github.com/oleg-st/ZstdSharp) 0.8.8 (MIT, pure managed zstd). The library is still pure managed code.
 
 ### Changed (breaking)
 - **`CtrFile.OpenRead` returns a `Stream`,** a `Z3dsReadStream` for a compressed file, rather than a `FileStream`.
