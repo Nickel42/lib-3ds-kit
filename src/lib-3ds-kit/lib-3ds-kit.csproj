@@ -8,7 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- Pure managed zstd (MIT), for Azahar's Z3DS format. -->
-    <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="lib-3ds-kit.Tests" />
