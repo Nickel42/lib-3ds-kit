@@ -174,6 +174,38 @@ public class VerificationTests
     }
 
     [Fact]
+    public void AesCbcStream_InPlaceAndBufferedReads_MatchOneShotDecryption()
+    {
+        var key = Convert.FromHexString("00112233445566778899aabbccddeeff");
+        var iv = Convert.FromHexString("0f0e0d0c0b0a09080706050403020100");
+        var plain = new byte[300_000 * 16];
+        new Random(3).NextBytes(plain);
+        var cipher = Crypto.AesUtil.CbcEncrypt(key, iv, plain);
+        using var cbc = new Crypto.AesCbcDecryptStream(new MemoryStream(cipher), key, iv);
+
+        // Aligned reads straight through (in place, IV carried over), unaligned ones, and jumps.
+        var back = new byte[plain.Length];
+        var rng = new Random(4);
+        for (int p = 0; p < back.Length;)
+        {
+            int n = Math.Min(back.Length - p, rng.Next(2) == 0 ? 16 * rng.Next(1, 20_000) : rng.Next(1, 100_000));
+            cbc.Position = p;
+            cbc.ReadExactly(back, p, n);
+            p += n;
+        }
+        Assert.True(plain.AsSpan().SequenceEqual(back));
+        for (int i = 0; i < 100; i++)
+        {
+            int p = rng.Next(plain.Length), n = Math.Min(plain.Length - p, rng.Next(1, 50_000));
+            if (rng.Next(2) == 0) { p &= ~15; n = Math.Max(16, n & ~15); n = Math.Min(n, plain.Length - p); }
+            var buf = new byte[n];
+            cbc.Position = p;
+            cbc.ReadExactly(buf);
+            Assert.True(plain.AsSpan(p, n).SequenceEqual(buf), $"bytes differ at {p}+{n}");
+        }
+    }
+
+    [Fact]
     public void KeyScrambler_MatchesReferenceVector()
     {
         var n = KeyScrambler.Generate(Convert.FromHexString(Fixtures.Fact("scrambler_x")),

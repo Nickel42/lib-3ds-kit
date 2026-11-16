@@ -15,6 +15,9 @@ public sealed class AesCbcDecryptStream : VirtualStream
     private readonly Stream _cipher;
     private readonly byte[] _iv;
     private readonly Aes _aes;
+    // The last ciphertext block of the previous read: the IV of a read that carries on from it.
+    private readonly byte[] _nextIv = new byte[16];
+    private long _nextIvAt = -1;
 
     public AesCbcDecryptStream(Stream ciphertext, ReadOnlySpan<byte> key, ReadOnlySpan<byte> iv)
     {
@@ -33,14 +36,29 @@ public sealed class AesCbcDecryptStream : VirtualStream
         long start = position & ~15L;
         long end = (position + buffer.Length + 15) & ~15L;
         int span = (int)(end - start);
+        Span<byte> iv = stackalloc byte[16];
+        if (start == 0) _iv.CopyTo(iv);
+        else if (start == _nextIvAt) _nextIv.CopyTo(iv);
+        else ReadExactlyAt(_cipher, start - 16, iv);
+        _nextIvAt = -1;
+
+        if (position == start && span == buffer.Length)
+        {
+            // Block-aligned (as sequential copies are): decrypt in place in the caller's buffer.
+            ReadExactlyAt(_cipher, start, buffer);
+            buffer[^16..].CopyTo(_nextIv);
+            _aes.DecryptCbc(buffer, iv, buffer, PaddingMode.None);
+            _nextIvAt = end;
+            return;
+        }
+
         byte[] ct = ArrayPool<byte>.Shared.Rent(span);
         byte[] pt = ArrayPool<byte>.Shared.Rent(span);
         try
         {
-            Span<byte> iv = stackalloc byte[16];
-            if (start == 0) _iv.CopyTo(iv);
-            else ReadExactlyAt(_cipher, start - 16, iv);
             ReadExactlyAt(_cipher, start, ct.AsSpan(0, span));
+            ct.AsSpan(span - 16, 16).CopyTo(_nextIv);
+            _nextIvAt = end;
             _aes.DecryptCbc(ct.AsSpan(0, span), iv, pt.AsSpan(0, span), PaddingMode.None);
             pt.AsSpan((int)(position - start), buffer.Length).CopyTo(buffer);
         }
