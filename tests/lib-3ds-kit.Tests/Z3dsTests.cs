@@ -105,6 +105,56 @@ public class Z3dsTests
     }
 
     [Fact]
+    public void WriteStream_GivesTheBytesOfCompressingEachFrameInTurn()
+    {
+        // Many more frames than are compressed at once, written in odd-sized pieces, with a short last frame.
+        var plain = new byte[1_000_000];
+        var rng = new Random(7);
+        for (int i = 0; i < plain.Length; i += 1000) if (rng.Next(2) == 0) rng.NextBytes(plain.AsSpan(i, 1000));
+        const int frame = 4096;
+        var meta = new[] { new KeyValuePair<string, byte[]>("date", "2026-01-01T00:00:00Z"u8.ToArray()) };
+
+        using var actual = new MemoryStream();
+        using (var z = new Z3dsWriteStream(actual, CtrFileType.Cci, frame, 3, meta))
+        {
+            for (int p = 0; p < plain.Length;)
+            {
+                int n = Math.Min(plain.Length - p, rng.Next(1, 3 * frame));
+                z.Write(plain, p, n);
+                p += n;
+            }
+            z.Finish();
+        }
+
+        // The same file built one frame at a time, as a single-threaded writer would.
+        using var expected = new MemoryStream();
+        var items = new Dictionary<string, byte[]>
+        {
+            ["compressor"] = "lib-3ds-kit"u8.ToArray(),
+            ["date"] = meta[0].Value,
+            ["maxframesize"] = "4096"u8.ToArray(),
+        };
+        var metadata = Z3dsFile.BuildMetadata(items);
+        expected.Write(Z3dsFile.BuildHeader("NCSD"u8, (uint)metadata.Length, 0, 0));
+        expected.Write(metadata);
+        var frames = new List<(int, int)>();
+        using (var c = new ZstdSharp.Compressor(3))
+            for (int p = 0; p < plain.Length; p += frame)
+            {
+                var packed = c.Wrap(plain.AsSpan(p, Math.Min(frame, plain.Length - p))).ToArray();
+                expected.Write(packed);
+                frames.Add((packed.Length, Math.Min(frame, plain.Length - p)));
+            }
+        var table = SeekTable.Build(frames);
+        expected.Write(table);
+        long compressed = expected.Length - 0x20 - metadata.Length;
+        expected.Position = 0;
+        expected.Write(Z3dsFile.BuildHeader("NCSD"u8, (uint)metadata.Length, (ulong)compressed, (ulong)plain.Length));
+
+        Assert.True(expected.ToArray().AsSpan().SequenceEqual(actual.ToArray()));
+    }
+
+    [Fact]
     public async Task Decrypt_ReadsACompressedCci()
     {
         using var tmp = new TempDir();
