@@ -1,6 +1,6 @@
 using System.Runtime.ExceptionServices;
 
-namespace Lib3dsKit.Z3ds;
+namespace Lib3dsKit.IO;
 
 /// <summary>
 /// A piece of work queued to the thread pool that the thread waiting for it runs itself if no pool thread

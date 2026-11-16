@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using Lib3dsKit.IO;
 using ZstdSharp;
 
 namespace Lib3dsKit.Z3ds;

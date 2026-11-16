@@ -152,6 +152,27 @@ public class VerificationTests
         Assert.All(r.Checks, c => Assert.Equal(CheckStatus.Skipped, c.Status));
     }
 
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(5L)]
+    [InlineData(0x1234567L)]
+    public void AesCtr_LongRangeSplitAcrossCores_MatchesSmallPieces(long offset)
+    {
+        var key = Convert.FromHexString("000102030405060708090a0b0c0d0e0f");
+        var counter = new UInt128(0x0123456789abcdef, 0xffffffffffffff00); // carries out of the low half
+        var data = new byte[3 * Crypto.AesCtrCipher.ParallelThreshold + 37];
+        new Random(5).NextBytes(data);
+        var whole = (byte[])data.Clone();
+        var pieces = (byte[])data.Clone();
+        using var c = new Crypto.AesCtrCipher(key);
+        c.Transform(counter, offset, whole);
+        for (int p = 0; p < pieces.Length; p += 4093)
+            c.Transform(counter, offset + p, pieces.AsSpan(p, Math.Min(4093, pieces.Length - p)));
+        Assert.True(whole.AsSpan().SequenceEqual(pieces));
+        c.Transform(counter, offset, whole);
+        Assert.True(whole.AsSpan().SequenceEqual(data)); // CTR undoes itself
+    }
+
     [Fact]
     public void KeyScrambler_MatchesReferenceVector()
     {
