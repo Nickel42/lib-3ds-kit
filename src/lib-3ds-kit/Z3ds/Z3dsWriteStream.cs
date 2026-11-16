@@ -116,10 +116,13 @@ public sealed class Z3dsWriteStream : Stream
     {
         var (task, plain, packed, length) = _inFlight.Peek();
         int size;
-        try { size = task.Wait(); }
-        catch { _failed = true; throw; }
+        try
+        {
+            size = task.Wait();
+            _dest.Write(packed, 0, size);
+        }
+        catch { _failed = true; throw; } // a frame or the destination failed: the file can't be finished
         _inFlight.Dequeue();
-        _dest.Write(packed, 0, size);
         _frames.Add((size, length));
         _compressedBytes += size;
         ArrayPool<byte>.Shared.Return(plain);
@@ -155,7 +158,7 @@ public sealed class Z3dsWriteStream : Stream
         while (_inFlight.Count > 0)
         {
             var (task, plain, packed, _) = _inFlight.Dequeue();
-            try { task.Wait(); } catch { } // already failed or being discarded
+            task.CancelOrWait(); // already failed or being discarded
             ArrayPool<byte>.Shared.Return(plain);
             ArrayPool<byte>.Shared.Return(packed);
         }

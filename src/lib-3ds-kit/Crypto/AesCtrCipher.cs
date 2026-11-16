@@ -85,7 +85,7 @@ public sealed class AesCtrCipher : IDisposable
         {
             // After a failure, nothing may still be writing to the buffer when it goes back to the pool.
             for (; waited < pieces.Length; waited++)
-                if (pieces[waited] is { } p) try { p.Wait(); } catch { }
+                pieces[waited]?.CancelOrWait();
             ArrayPool<byte>.Shared.Return(keystream);
         }
     }

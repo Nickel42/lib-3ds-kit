@@ -84,7 +84,8 @@ public sealed class Z3dsReadStream : VirtualStream
     private void Load(int index)
     {
         if (index == _cached) return;
-        bool sequential = index == _last + 1;
+        // Two frames in a row: a single read at the start (headers) doesn't set off the read-ahead.
+        bool sequential = _last >= 0 && index == _last + 1;
         _last = index;
         _cached = -1;
         if (_ahead.Count > 0 && _ahead.Peek().Index == index) TakeAhead();
@@ -162,7 +163,7 @@ public sealed class Z3dsReadStream : VirtualStream
         while (_ahead.Count > 0)
         {
             var (_, plain, done) = _ahead.Dequeue();
-            try { done.Wait(); } catch { } // of no use now, damaged or not
+            done.CancelOrWait(); // of no use now: not started, it's dropped; damaged or not, it's discarded
             ArrayPool<byte>.Shared.Return(plain);
         }
     }

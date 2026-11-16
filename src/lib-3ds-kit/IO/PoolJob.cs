@@ -28,6 +28,17 @@ internal sealed class PoolJob<T>
         return _result!;
     }
 
+    /// <summary>
+    /// Drops the work if nothing has started it yet (it then never runs, and <see cref="Wait"/> returns
+    /// the default). Otherwise waits for it to finish, swallowing any exception. Either way, nothing is
+    /// running it once this returns.
+    /// </summary>
+    public void CancelOrWait()
+    {
+        if (Interlocked.Exchange(ref _claimed, 1) == 0) { _done.Set(); return; }
+        _done.Wait();
+    }
+
     private bool TryRun()
     {
         if (Interlocked.Exchange(ref _claimed, 1) != 0) return false;

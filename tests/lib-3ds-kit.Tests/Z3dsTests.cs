@@ -145,6 +145,36 @@ public class Z3dsTests
     }
 
     [Fact]
+    public void WriteStream_AfterTheDestinationFails_DisposeWritesNothingMore()
+    {
+        var dest = new FailingStream(failAfter: 20_000);
+        var z = new Z3dsWriteStream(dest, CtrFileType.Cci, 4096);
+        var data = new byte[4096];
+        Assert.Throws<IOException>(() =>
+        {
+            for (int i = 0; i < 1000; i++) z.Write(data);
+            z.Finish();
+        });
+        int writesAtFailure = dest.Writes;
+        z.Dispose(); // must neither throw nor try to write the frames still in flight
+        Assert.Equal(writesAtFailure, dest.Writes);
+    }
+
+    private sealed class FailingStream(long failAfter) : MemoryStream
+    {
+        public int Writes { get; private set; }
+
+        public override void Write(ReadOnlySpan<byte> buffer) => Write(buffer.ToArray(), 0, buffer.Length);
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            Writes++;
+            if (Length + count > failAfter) throw new IOException("disk full");
+            base.Write(buffer, offset, count);
+        }
+    }
+
+    [Fact]
     public void WriteStream_GivesTheBytesOfCompressingEachFrameInTurn()
     {
         // Many more frames than are compressed at once, written in odd-sized pieces, with a short last frame.
