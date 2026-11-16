@@ -67,6 +67,46 @@ public class Z3dsTests
     }
 
     [Fact]
+    public void ReadStream_ReadingAheadGivesTheSameBytes_ThroughJumpsAndDamage()
+    {
+        using var tmp = new TempDir();
+        string input = Fixtures.File("game_a.3ds"), z = tmp.File("ahead.zcci");
+        Converter().Compress(input, z, new CtrConvertOptions { CompressionFrameSize = 4096 });
+        var plain = File.ReadAllBytes(input);
+        var file = File.ReadAllBytes(z);
+
+        // Sequential reads in odd sizes (frames are decompressed ahead), with a jump back and one forward.
+        using (var rs = new Z3dsReadStream(new MemoryStream(file)))
+        {
+            var rng = new Random(99);
+            var back = new byte[plain.Length];
+            int p = 0;
+            bool jumpedBack = false, jumpedForward = false;
+            while (p < plain.Length)
+            {
+                if (!jumpedBack && p > plain.Length / 3) { jumpedBack = true; rs.Position = p = plain.Length / 10; }
+                else if (jumpedBack && !jumpedForward && p > plain.Length / 2) { jumpedForward = true; rs.Position = p += (plain.Length - p) / 4; }
+                int n = rs.Read(back, p, Math.Min(plain.Length - p, rng.Next(1, 6000)));
+                Assert.True(plain.AsSpan(p, n).SequenceEqual(back.AsSpan(p, n)), $"bytes differ at {p}+{n}");
+                p += n;
+            }
+        }
+
+        // A damaged frame well into the file, reached by reading straight through, is reported.
+        using (var ms = new MemoryStream(file))
+        {
+            var h = Z3dsFile.ReadHeader(ms);
+            int end = (int)(h.DataOffset + (long)h.CompressedSize);
+            int frames = (int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(end - 9));
+            int tableStart = end - 9 - frames * 8 - 8, c = (int)h.DataOffset;
+            for (int i = 0; i < frames / 2; i++) c += (int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(tableStart + 8 + i * 8));
+            file[c + 6] ^= 0xFF;
+        }
+        using (var rs = new Z3dsReadStream(new MemoryStream(file)))
+            Assert.Throws<CtrFormatException>(() => rs.CopyTo(Stream.Null, 3000));
+    }
+
+    [Fact]
     public void EveryFrameIsAStandaloneZstdFrameListedInTheSeekTable()
     {
         using var tmp = new TempDir();

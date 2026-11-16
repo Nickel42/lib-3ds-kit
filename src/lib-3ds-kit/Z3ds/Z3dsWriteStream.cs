@@ -17,7 +17,7 @@ public sealed class Z3dsWriteStream : Stream
     private readonly byte[] _magic;
     private readonly uint _metadataSize;
     private readonly long _headerOffset;
-    private readonly Queue<(Task<int> Packed, byte[] Plain, byte[] Out, int Length)> _inFlight = new();
+    private readonly Queue<(PoolJob<int> Packed, byte[] Plain, byte[] Out, int Length)> _inFlight = new();
     private readonly ConcurrentBag<Compressor> _compressors = new();
     private readonly int _window;
     private readonly int _bound;
@@ -101,7 +101,7 @@ public sealed class Z3dsWriteStream : Stream
         int length = _fill;
         _current = ArrayPool<byte>.Shared.Rent(_frameSize);
         _fill = 0;
-        var task = Task.Run(() =>
+        var task = new PoolJob<int>(() =>
         {
             if (!_compressors.TryTake(out var c)) c = new Compressor(_level);
             try { return c.Wrap(plain.AsSpan(0, length), packed); }
@@ -115,7 +115,7 @@ public sealed class Z3dsWriteStream : Stream
     {
         var (task, plain, packed, length) = _inFlight.Peek();
         int size;
-        try { size = task.GetAwaiter().GetResult(); }
+        try { size = task.Wait(); }
         catch { _failed = true; throw; }
         _inFlight.Dequeue();
         _dest.Write(packed, 0, size);
@@ -154,7 +154,7 @@ public sealed class Z3dsWriteStream : Stream
         while (_inFlight.Count > 0)
         {
             var (task, plain, packed, _) = _inFlight.Dequeue();
-            try { task.Wait(); } catch (AggregateException) { }
+            try { task.Wait(); } catch { } // already failed or being discarded
             ArrayPool<byte>.Shared.Return(plain);
             ArrayPool<byte>.Shared.Return(packed);
         }
