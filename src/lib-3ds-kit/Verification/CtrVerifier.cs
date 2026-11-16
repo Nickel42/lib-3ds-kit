@@ -5,6 +5,7 @@ using Lib3dsKit.Cia;
 using Lib3dsKit.Keys;
 using Lib3dsKit.Ncch;
 using Lib3dsKit.Ncsd;
+using Lib3dsKit.Z3ds;
 
 namespace Lib3dsKit.Verification;
 
@@ -58,13 +59,23 @@ public sealed class CtrVerifier
         using var fs = CtrFile.OpenRead(path);
         var info = CtrInspector.Inspect(fs, path, _keys);
 
-        // ---- whole-file hashes (one pass)
+        // ---- whole-file hashes (one pass). With no hashes asked for, a plain file isn't read at all:
+        // the internal checks below only read headers. A compressed file is still read through, since
+        // decompressing every frame is the only way to tell a damaged frame.
         var tracker = new ProgressTracker(progress, fs.Length);
-        tracker.SetStage("Hashing " + Path.GetFileName(path));
-        using var raw = new MultiHasher(options.HashKinds);
-        fs.Position = 0;
-        StreamCopier.Copy(fs, null, fs.Length, tracker, ct, raw);
-        FileHashes hashes = raw.Finish();
+        FileHashes hashes;
+        if (options.HashKinds == HashKinds.None && fs is not Z3dsReadStream)
+        {
+            hashes = new FileHashes(fs.Length, null, null, null, null);
+        }
+        else
+        {
+            tracker.SetStage("Hashing " + Path.GetFileName(path));
+            using var raw = new MultiHasher(options.HashKinds);
+            fs.Position = 0;
+            StreamCopier.Copy(fs, null, fs.Length, tracker, ct, raw);
+            hashes = raw.Finish();
+        }
 
         // ---- internal integrity
         var checks = new List<IntegrityCheck>();

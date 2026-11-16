@@ -67,6 +67,46 @@ public class Z3dsTests
     }
 
     [Fact]
+    public void ReadStream_ReadingAheadGivesTheSameBytes_ThroughJumpsAndDamage()
+    {
+        using var tmp = new TempDir();
+        string input = Fixtures.File("game_a.3ds"), z = tmp.File("ahead.zcci");
+        Converter().Compress(input, z, new CtrConvertOptions { CompressionFrameSize = 4096 });
+        var plain = File.ReadAllBytes(input);
+        var file = File.ReadAllBytes(z);
+
+        // Sequential reads in odd sizes (frames are decompressed ahead), with a jump back and one forward.
+        using (var rs = new Z3dsReadStream(new MemoryStream(file)))
+        {
+            var rng = new Random(99);
+            var back = new byte[plain.Length];
+            int p = 0;
+            bool jumpedBack = false, jumpedForward = false;
+            while (p < plain.Length)
+            {
+                if (!jumpedBack && p > plain.Length / 3) { jumpedBack = true; rs.Position = p = plain.Length / 10; }
+                else if (jumpedBack && !jumpedForward && p > plain.Length / 2) { jumpedForward = true; rs.Position = p += (plain.Length - p) / 4; }
+                int n = rs.Read(back, p, Math.Min(plain.Length - p, rng.Next(1, 6000)));
+                Assert.True(plain.AsSpan(p, n).SequenceEqual(back.AsSpan(p, n)), $"bytes differ at {p}+{n}");
+                p += n;
+            }
+        }
+
+        // A damaged frame well into the file, reached by reading straight through, is reported.
+        using (var ms = new MemoryStream(file))
+        {
+            var h = Z3dsFile.ReadHeader(ms);
+            int end = (int)(h.DataOffset + (long)h.CompressedSize);
+            int frames = (int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(end - 9));
+            int tableStart = end - 9 - frames * 8 - 8, c = (int)h.DataOffset;
+            for (int i = 0; i < frames / 2; i++) c += (int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(tableStart + 8 + i * 8));
+            file[c + 6] ^= 0xFF;
+        }
+        using (var rs = new Z3dsReadStream(new MemoryStream(file)))
+            Assert.Throws<CtrFormatException>(() => rs.CopyTo(Stream.Null, 3000));
+    }
+
+    [Fact]
     public void EveryFrameIsAStandaloneZstdFrameListedInTheSeekTable()
     {
         using var tmp = new TempDir();
@@ -102,6 +142,86 @@ public class Z3dsTests
         }
         Assert.Equal(tableStart, c);
         Assert.Equal(plain.Length, d);
+    }
+
+    [Fact]
+    public void WriteStream_AfterTheDestinationFails_DisposeWritesNothingMore()
+    {
+        var dest = new FailingStream(failAfter: 20_000);
+        var z = new Z3dsWriteStream(dest, CtrFileType.Cci, 4096);
+        var data = new byte[4096];
+        Assert.Throws<IOException>(() =>
+        {
+            for (int i = 0; i < 1000; i++) z.Write(data);
+            z.Finish();
+        });
+        int writesAtFailure = dest.Writes;
+        z.Dispose(); // must neither throw nor try to write the frames still in flight
+        Assert.Equal(writesAtFailure, dest.Writes);
+    }
+
+    private sealed class FailingStream(long failAfter) : MemoryStream
+    {
+        public int Writes { get; private set; }
+
+        public override void Write(ReadOnlySpan<byte> buffer) => Write(buffer.ToArray(), 0, buffer.Length);
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            Writes++;
+            if (Length + count > failAfter) throw new IOException("disk full");
+            base.Write(buffer, offset, count);
+        }
+    }
+
+    [Fact]
+    public void WriteStream_GivesTheBytesOfCompressingEachFrameInTurn()
+    {
+        // Many more frames than are compressed at once, written in odd-sized pieces, with a short last frame.
+        var plain = new byte[1_000_000];
+        var rng = new Random(7);
+        for (int i = 0; i < plain.Length; i += 1000) if (rng.Next(2) == 0) rng.NextBytes(plain.AsSpan(i, 1000));
+        const int frame = 4096;
+        var meta = new[] { new KeyValuePair<string, byte[]>("date", "2026-01-01T00:00:00Z"u8.ToArray()) };
+
+        using var actual = new MemoryStream();
+        using (var z = new Z3dsWriteStream(actual, CtrFileType.Cci, frame, 3, meta))
+        {
+            for (int p = 0; p < plain.Length;)
+            {
+                int n = Math.Min(plain.Length - p, rng.Next(1, 3 * frame));
+                z.Write(plain, p, n);
+                p += n;
+            }
+            z.Finish();
+        }
+
+        // The same file built one frame at a time, as a single-threaded writer would.
+        using var expected = new MemoryStream();
+        var items = new Dictionary<string, byte[]>
+        {
+            ["compressor"] = "lib-3ds-kit"u8.ToArray(),
+            ["date"] = meta[0].Value,
+            ["maxframesize"] = "4096"u8.ToArray(),
+        };
+        var metadata = Z3dsFile.BuildMetadata(items);
+        expected.Write(Z3dsFile.BuildHeader("NCSD"u8, (uint)metadata.Length, 0, 0));
+        expected.Write(metadata);
+        var frames = new List<(int, int)>();
+        using (var c = new ZstdSharp.Compressor(3))
+            for (int p = 0; p < plain.Length; p += frame)
+            {
+                var packed = c.Wrap(plain.AsSpan(p, Math.Min(frame, plain.Length - p))).ToArray();
+                expected.Write(packed);
+                frames.Add((packed.Length, Math.Min(frame, plain.Length - p)));
+            }
+        var table = SeekTable.Build(frames);
+        expected.Write(table);
+        long compressed = expected.Length - 0x20 - metadata.Length;
+        expected.Position = 0;
+        expected.Write(Z3dsFile.BuildHeader("NCSD"u8, (uint)metadata.Length, (ulong)compressed, (ulong)plain.Length));
+
+        Assert.True(expected.ToArray().AsSpan().SequenceEqual(actual.ToArray()));
     }
 
     [Fact]

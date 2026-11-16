@@ -12,6 +12,13 @@ All notable changes are listed here. Versions follow [Semantic Versioning](https
   - **CLI:** new `compress` and `decompress` commands, `--compress` and `--level` for `decrypt` and `convert`, and every command reads Z3DS input.
 - **Dependency:** [ZstdSharp.Port](https://github.com/oleg-st/ZstdSharp) 0.8.8 (MIT, pure managed zstd). The library is still pure managed code.
 
+### Performance
+- **Verifying without hashes** (`CtrVerifyOptions.HashKinds = HashKinds.None`) no longer reads a plain file through: the internal checks only read headers. A compressed file is still read through, so a damaged frame is caught.
+- **Compressing to Z3DS** no longer stops the caller for a batch of frames at a time: each frame is compressed on the thread pool as soon as it is cut, frames are written in order, and buffers and compressors are reused. About twice as fast on a many-core machine; the output is the same bytes.
+- **Reading Z3DS straight through** (hashing a `.zcci`, decompressing, decrypting one) decompresses the next frames ahead on the thread pool. About three times faster to read on a many-core machine.
+- **AES-CTR** makes the keystream of long ranges (1 MiB or more) on several cores and XORs it 128 bytes at a time; **AES-CBC** (encrypted CIA contents) carries the IV over between reads and decrypts aligned reads in place.
+- **Uncompressed outputs** have their space set aside up front (`AtomicFileWriter` takes the expected size).
+
 ### Changed (breaking)
 - **`CtrFile.OpenRead` returns a `Stream`,** a `Z3dsReadStream` for a compressed file, rather than a `FileStream`.
 

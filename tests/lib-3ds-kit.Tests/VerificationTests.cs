@@ -76,6 +76,42 @@ public class VerificationTests
     }
 
     [Fact]
+    public async Task Verify_WithoutHashes_SkipsTheWholeFilePass_ButNotTheChecks()
+    {
+        var r = await new CtrVerifier(Fixtures.Keys()).VerifyAsync(Fixtures.File("game_a.3ds"),
+            new CtrVerifyOptions { HashKinds = HashKinds.None });
+        Assert.Equal(CtrVerdict.Intact, r.Verdict);
+        Assert.Equal(new FileInfo(Fixtures.File("game_a.3ds")).Length, r.Hashes.Size);
+        Assert.Null(r.Hashes.Crc32);
+        Assert.Null(r.Hashes.Sha256);
+        Assert.NotEmpty(r.Checks);
+    }
+
+    [Fact]
+    public async Task Verify_WithoutHashes_StillReadsEveryFrameOfACompressedFile()
+    {
+        using var tmp = new TempDir();
+        string z = tmp.File("a.zcci");
+        await new Operations.CtrConverter(Fixtures.Keys()).CompressAsync(Fixtures.File("expected/game_a.decrypted.3ds"), z,
+            new Operations.CtrConvertOptions { CompressionFrameSize = 4096 });
+        var none = new CtrVerifyOptions { HashKinds = HashKinds.None };
+        Assert.Equal(CtrVerdict.Intact, (await new CtrVerifier(Fixtures.Keys()).VerifyAsync(z, none)).Verdict);
+
+        // Damage the last frame, which no header check reads.
+        var file = File.ReadAllBytes(z);
+        using (var rs = new Z3ds.Z3dsReadStream(new MemoryStream(file)))
+        {
+            long end = rs.Header.DataOffset + (long)rs.Header.CompressedSize;
+            int frames = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan((int)end - 9));
+            int tableStart = (int)end - 9 - frames * 8 - 8;
+            int lastSize = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(tableStart + 8 + (frames - 1) * 8));
+            file[tableStart - lastSize + 6] ^= 0xFF;
+        }
+        File.WriteAllBytes(z, file);
+        await Assert.ThrowsAsync<CtrFormatException>(() => new CtrVerifier(Fixtures.Keys()).VerifyAsync(z, none));
+    }
+
+    [Fact]
     public async Task Verify_Cia_PassesTmdChecks()
     {
         var r = await new CtrVerifier(Fixtures.Keys()).VerifyAsync(Fixtures.File("game_b.cia"));
@@ -114,6 +150,59 @@ public class VerificationTests
         var r = await new CtrVerifier(new CtrKeyStore()).VerifyAsync(Fixtures.File("game_a.3ds"));
         Assert.Equal(CtrVerdict.Unknown, r.Verdict);
         Assert.All(r.Checks, c => Assert.Equal(CheckStatus.Skipped, c.Status));
+    }
+
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(5L)]
+    [InlineData(0x1234567L)]
+    public void AesCtr_LongRangeSplitAcrossCores_MatchesSmallPieces(long offset)
+    {
+        var key = Convert.FromHexString("000102030405060708090a0b0c0d0e0f");
+        var counter = new UInt128(0x0123456789abcdef, 0xffffffffffffff00); // carries out of the low half
+        var data = new byte[3 * Crypto.AesCtrCipher.ParallelThreshold + 37];
+        new Random(5).NextBytes(data);
+        var whole = (byte[])data.Clone();
+        var pieces = (byte[])data.Clone();
+        using var c = new Crypto.AesCtrCipher(key);
+        c.Transform(counter, offset, whole);
+        for (int p = 0; p < pieces.Length; p += 4093)
+            c.Transform(counter, offset + p, pieces.AsSpan(p, Math.Min(4093, pieces.Length - p)));
+        Assert.True(whole.AsSpan().SequenceEqual(pieces));
+        c.Transform(counter, offset, whole);
+        Assert.True(whole.AsSpan().SequenceEqual(data)); // CTR undoes itself
+    }
+
+    [Fact]
+    public void AesCbcStream_InPlaceAndBufferedReads_MatchOneShotDecryption()
+    {
+        var key = Convert.FromHexString("00112233445566778899aabbccddeeff");
+        var iv = Convert.FromHexString("0f0e0d0c0b0a09080706050403020100");
+        var plain = new byte[300_000 * 16];
+        new Random(3).NextBytes(plain);
+        var cipher = Crypto.AesUtil.CbcEncrypt(key, iv, plain);
+        using var cbc = new Crypto.AesCbcDecryptStream(new MemoryStream(cipher), key, iv);
+
+        // Aligned reads straight through (in place, IV carried over), unaligned ones, and jumps.
+        var back = new byte[plain.Length];
+        var rng = new Random(4);
+        for (int p = 0; p < back.Length;)
+        {
+            int n = Math.Min(back.Length - p, rng.Next(2) == 0 ? 16 * rng.Next(1, 20_000) : rng.Next(1, 100_000));
+            cbc.Position = p;
+            cbc.ReadExactly(back, p, n);
+            p += n;
+        }
+        Assert.True(plain.AsSpan().SequenceEqual(back));
+        for (int i = 0; i < 100; i++)
+        {
+            int p = rng.Next(plain.Length), n = Math.Min(plain.Length - p, rng.Next(1, 50_000));
+            if (rng.Next(2) == 0) { p &= ~15; n = Math.Max(16, n & ~15); n = Math.Min(n, plain.Length - p); }
+            var buf = new byte[n];
+            cbc.Position = p;
+            cbc.ReadExactly(buf);
+            Assert.True(plain.AsSpan(p, n).SequenceEqual(buf), $"bytes differ at {p}+{n}");
+        }
     }
 
     [Fact]

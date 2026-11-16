@@ -1,12 +1,14 @@
 using System.Buffers;
+using System.Collections.Concurrent;
+using Lib3dsKit.IO;
 using ZstdSharp;
 
 namespace Lib3dsKit.Z3ds;
 
 /// <summary>
 /// Writes a Z3DS file: what's written to this stream is cut into frames, each compressed as its own
-/// zstd frame (several at once, on the thread pool) and written to the destination in order. <see cref="Finish"/>
-/// adds the seek table and goes back to fill in the header, so the destination must be seekable.
+/// zstd frame on the thread pool while the caller goes on writing, and written to the destination in order.
+/// <see cref="Finish"/> adds the seek table and goes back to fill in the header, so the destination must be seekable.
 /// </summary>
 public sealed class Z3dsWriteStream : Stream
 {
@@ -16,14 +18,17 @@ public sealed class Z3dsWriteStream : Stream
     private readonly byte[] _magic;
     private readonly uint _metadataSize;
     private readonly long _headerOffset;
-    private readonly List<byte[]> _pending = new();
-    private readonly int _batch;
+    private readonly Queue<(PoolJob<int> Packed, byte[] Plain, byte[] Out, int Length)> _inFlight = new();
+    private readonly ConcurrentBag<Compressor> _compressors = new();
+    private readonly int _window;
+    private readonly int _bound;
     private readonly List<(int Compressed, int Decompressed)> _frames = new();
     private byte[] _current;
     private int _fill;
     private long _written;
     private long _compressedBytes;
     private bool _finished;
+    private bool _failed;
 
     /// <param name="destination">Seekable; the Z3DS file is written from its current position.</param>
     /// <param name="type">What's being compressed: sets the underlying magic Azahar reads.</param>
@@ -38,8 +43,9 @@ public sealed class Z3dsWriteStream : Stream
         _magic = Z3dsFile.UnderlyingMagicOf(type);
         _frameSize = frameSize > 0 ? frameSize : Z3dsFile.FrameSizeFor(type);
         _level = level;
-        // Several frames are compressed at once, up to about 256 MiB of input at a time.
-        _batch = Math.Max(1, Math.Min(Environment.ProcessorCount * 2, 256 * 1024 * 1024 / _frameSize));
+        // Up to two frames per core are compressed at once, and at most about 256 MiB of input is in flight.
+        _window = Math.Max(1, Math.Min(Environment.ProcessorCount * 2, 256 * 1024 * 1024 / _frameSize));
+        _bound = Compressor.GetCompressBound(_frameSize);
         _current = ArrayPool<byte>.Shared.Rent(_frameSize);
 
         var items = new Dictionary<string, byte[]>
@@ -90,46 +96,75 @@ public sealed class Z3dsWriteStream : Stream
 
     private void QueueFrame()
     {
-        // The last frame of a batch may be partly full; the length travels with it below.
-        _pending.Add(_current.AsSpan(0, _fill).ToArray());
+        // The last frame may be partly full; its length travels with it.
+        if (_inFlight.Count >= _window) WriteOldest();
+        byte[] plain = _current, packed = ArrayPool<byte>.Shared.Rent(_bound);
+        int length = _fill;
+        _current = ArrayPool<byte>.Shared.Rent(_frameSize);
         _fill = 0;
-        if (_pending.Count >= _batch) CompressPending();
+        var task = new PoolJob<int>(() =>
+        {
+            if (!_compressors.TryTake(out var c)) c = new Compressor(_level);
+            try { return c.Wrap(plain.AsSpan(0, length), packed); }
+            finally { _compressors.Add(c); }
+        });
+        _inFlight.Enqueue((task, plain, packed, length));
     }
 
-    private void CompressPending()
+    /// <summary>Waits for the oldest frame in flight and writes it.</summary>
+    private void WriteOldest()
     {
-        if (_pending.Count == 0) return;
-        var packed = new byte[_pending.Count][];
-        var level = _level;
-        using (var compressors = new ThreadLocal<Compressor>(() => new Compressor(level), trackAllValues: true))
+        var (task, plain, packed, length) = _inFlight.Peek();
+        int size;
+        try
         {
-            Parallel.For(0, _pending.Count, i => packed[i] = compressors.Value!.Wrap(_pending[i]).ToArray());
-            foreach (var c in compressors.Values) c.Dispose();
+            size = task.Wait();
+            _dest.Write(packed, 0, size);
         }
-        for (int i = 0; i < packed.Length; i++)
-        {
-            _dest.Write(packed[i]);
-            _frames.Add((packed[i].Length, _pending[i].Length));
-            _compressedBytes += packed[i].Length;
-        }
-        _pending.Clear();
+        catch { _failed = true; throw; } // a frame or the destination failed: the file can't be finished
+        _inFlight.Dequeue();
+        _frames.Add((size, length));
+        _compressedBytes += size;
+        ArrayPool<byte>.Shared.Return(plain);
+        ArrayPool<byte>.Shared.Return(packed);
     }
 
     /// <summary>Compresses what's left, writes the seek table and the header. Called by Dispose if not before.</summary>
     public void Finish()
     {
         if (_finished) return;
-        if (_fill > 0) QueueFrame();
-        CompressPending();
-        var table = SeekTable.Build(_frames);
-        _dest.Write(table);
-        _compressedBytes += table.Length;
-        long end = _dest.Position;
-        _dest.Position = _headerOffset;
-        _dest.Write(Z3dsFile.BuildHeader(_magic, _metadataSize, (ulong)_compressedBytes, (ulong)_written));
-        _dest.Position = end;
         _finished = true;
+        try
+        {
+            if (_fill > 0) QueueFrame();
+            while (_inFlight.Count > 0) WriteOldest();
+            var table = SeekTable.Build(_frames);
+            _dest.Write(table);
+            _compressedBytes += table.Length;
+            long end = _dest.Position;
+            _dest.Position = _headerOffset;
+            _dest.Write(Z3dsFile.BuildHeader(_magic, _metadataSize, (ulong)_compressedBytes, (ulong)_written));
+            _dest.Position = end;
+        }
+        finally
+        {
+            Release();
+        }
+    }
+
+    /// <summary>Lets the frames still in flight finish (after a failure), then gives back buffers and compressors.</summary>
+    private void Release()
+    {
+        while (_inFlight.Count > 0)
+        {
+            var (task, plain, packed, _) = _inFlight.Dequeue();
+            task.CancelOrWait(); // already failed or being discarded
+            ArrayPool<byte>.Shared.Return(plain);
+            ArrayPool<byte>.Shared.Return(packed);
+        }
         ArrayPool<byte>.Shared.Return(_current);
+        _current = [];
+        while (_compressors.TryTake(out var c)) c.Dispose();
     }
 
     public override void Flush() { }
@@ -139,7 +174,11 @@ public sealed class Z3dsWriteStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing && !_finished) Finish();
+        if (disposing && !_finished)
+        {
+            if (_failed) { _finished = true; Release(); } // nothing more is written after a frame failed
+            else Finish();
+        }
         base.Dispose(disposing);
     }
 }

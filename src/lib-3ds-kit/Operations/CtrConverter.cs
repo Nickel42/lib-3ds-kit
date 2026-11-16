@@ -672,7 +672,7 @@ public sealed class CtrConverter
     {
         var tracker = new ProgressTracker(progress, totalBytes);
         using var hasher = options.ComputeOutputHashes ? new MultiHasher() : null;
-        using var writer = new AtomicFileWriter(output, options.Overwrite);
+        using var writer = new AtomicFileWriter(output, options.Overwrite, options.Compress ? 0 : totalBytes);
         tracker.SetStage((options.Compress ? "Compressing " : "Writing ") + Path.GetFileName(output));
         if (options.Compress)
         {
