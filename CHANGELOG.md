@@ -2,7 +2,7 @@
 
 All notable changes are listed here. Versions follow [Semantic Versioning](https://semver.org/); while the version is 0.x, minor versions may change the API.
 
-## Unreleased
+## 0.12.0
 
 ### Added
 - **Azahar's compressed formats (Z3DS):** `.zcci`, `.zcia`, `.zcxi` and `.z3dsx`.
