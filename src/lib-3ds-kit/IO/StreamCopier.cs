@@ -143,7 +143,11 @@ public sealed class AtomicFileWriter : IDisposable
     private readonly string _tempPath;
     private bool _committed;
 
-    public AtomicFileWriter(string path, bool overwrite)
+    public AtomicFileWriter(string path, bool overwrite) : this(path, overwrite, 0) { }
+
+    /// <param name="preallocationSize">The expected size, so the file system can set the space aside at
+    /// once (0 for none). It doesn't change the file's length, which is what's written.</param>
+    public AtomicFileWriter(string path, bool overwrite, long preallocationSize)
     {
         _finalPath = Path.GetFullPath(path);
         if (!overwrite && File.Exists(_finalPath))
@@ -151,8 +155,15 @@ public sealed class AtomicFileWriter : IDisposable
         var dir = Path.GetDirectoryName(_finalPath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         _tempPath = _finalPath + ".lib-3ds-kit.tmp";
-        Stream = new FileStream(_tempPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None,
-            1024 * 1024, FileOptions.None);
+        Stream = new FileStream(_tempPath, new FileStreamOptions
+        {
+            Mode = FileMode.Create,
+            Access = FileAccess.ReadWrite,
+            Share = FileShare.None,
+            BufferSize = 1024 * 1024,
+            Options = FileOptions.None,
+            PreallocationSize = Math.Max(0, preallocationSize),
+        });
     }
 
     public FileStream Stream { get; }
