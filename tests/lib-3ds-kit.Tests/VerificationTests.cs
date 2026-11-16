@@ -76,6 +76,42 @@ public class VerificationTests
     }
 
     [Fact]
+    public async Task Verify_WithoutHashes_SkipsTheWholeFilePass_ButNotTheChecks()
+    {
+        var r = await new CtrVerifier(Fixtures.Keys()).VerifyAsync(Fixtures.File("game_a.3ds"),
+            new CtrVerifyOptions { HashKinds = HashKinds.None });
+        Assert.Equal(CtrVerdict.Intact, r.Verdict);
+        Assert.Equal(new FileInfo(Fixtures.File("game_a.3ds")).Length, r.Hashes.Size);
+        Assert.Null(r.Hashes.Crc32);
+        Assert.Null(r.Hashes.Sha256);
+        Assert.NotEmpty(r.Checks);
+    }
+
+    [Fact]
+    public async Task Verify_WithoutHashes_StillReadsEveryFrameOfACompressedFile()
+    {
+        using var tmp = new TempDir();
+        string z = tmp.File("a.zcci");
+        await new Operations.CtrConverter(Fixtures.Keys()).CompressAsync(Fixtures.File("expected/game_a.decrypted.3ds"), z,
+            new Operations.CtrConvertOptions { CompressionFrameSize = 4096 });
+        var none = new CtrVerifyOptions { HashKinds = HashKinds.None };
+        Assert.Equal(CtrVerdict.Intact, (await new CtrVerifier(Fixtures.Keys()).VerifyAsync(z, none)).Verdict);
+
+        // Damage the last frame, which no header check reads.
+        var file = File.ReadAllBytes(z);
+        using (var rs = new Z3ds.Z3dsReadStream(new MemoryStream(file)))
+        {
+            long end = rs.Header.DataOffset + (long)rs.Header.CompressedSize;
+            int frames = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan((int)end - 9));
+            int tableStart = (int)end - 9 - frames * 8 - 8;
+            int lastSize = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(tableStart + 8 + (frames - 1) * 8));
+            file[tableStart - lastSize + 6] ^= 0xFF;
+        }
+        File.WriteAllBytes(z, file);
+        await Assert.ThrowsAsync<CtrFormatException>(() => new CtrVerifier(Fixtures.Keys()).VerifyAsync(z, none));
+    }
+
+    [Fact]
     public async Task Verify_Cia_PassesTmdChecks()
     {
         var r = await new CtrVerifier(Fixtures.Keys()).VerifyAsync(Fixtures.File("game_b.cia"));
